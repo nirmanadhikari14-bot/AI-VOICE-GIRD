@@ -1,0 +1,65 @@
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "${SMTP_HOST:-smtp.example.com}:587"
+  smtp_from: "VoiceGuard Alerts <${SMTP_FROM:-alerts@voiceguard.example.com}>"
+  smtp_auth_username: "${SMTP_USER:-}"
+  smtp_auth_password: "${SMTP_PASSWORD:-}"
+  smtp_require_tls: true
+
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+route:
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "default"
+
+  routes:
+    # Critical alerts → immediate notification
+    - matchers:
+        - severity = "critical"
+      receiver: "critical"
+      group_wait: 10s
+      repeat_interval: 1h
+
+    # TLS expiry → dedicated receiver
+    - matchers:
+        - alertname =~ "TLSCert.*"
+      receiver: "security-team"
+      repeat_interval: 12h
+
+receivers:
+  - name: "default"
+    email_configs:
+      - to: "${ALERT_EMAIL:-ops@voiceguard.example.com}"
+        subject: "[VoiceGuard] {{ .Status | toUpper }}: {{ .GroupLabels.alertname }}"
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Severity: {{ .Labels.severity }}
+          Time: {{ .StartsAt }}
+          {{ end }}
+
+  - name: "critical"
+    email_configs:
+      - to: "${CRITICAL_ALERT_EMAIL:-oncall@voiceguard.example.com}"
+        subject: "[CRITICAL] VoiceGuard: {{ .GroupLabels.alertname }}"
+        send_resolved: true
+
+  - name: "security-team"
+    email_configs:
+      - to: "${SECURITY_EMAIL:-security@voiceguard.example.com}"
+        subject: "[VoiceGuard Security] {{ .GroupLabels.alertname }}"
+        send_resolved: true
+
+inhibit_rules:
+  # If BackendDown fires, suppress BackendHighErrorRate (redundant)
+  - source_matchers:
+      - alertname = "BackendDown"
+    target_matchers:
+      - alertname = "BackendHighErrorRate"
+    equal: ["job"]
+

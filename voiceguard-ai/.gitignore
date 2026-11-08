@@ -1,0 +1,65 @@
+backend/venv/
+frontend/node_modules/
+mobile/node_modules/
+desktop/node_modules/
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+models/
+datasets/
+
+# SQLite database files — must never be committed (contain seeded/live data)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Build output directories
+frontend/dist/
+desktop/dist/
+desktop/dist-electron/
+desktop/release/
+mobile/android/app/build/
+mobile/ios/build/
+
+# OS and editor artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/settings.json
+
+# Logs
+*.log
+logs/
+backend/logs/
+
+# Test coverage
+.coverage
+htmlcov/
+coverage.xml
+*.lcov
+
+# Temporary files
+tmp/
+temp/
+scratch/
+
+# Infrastructure & Secrets
+!.env.example
+!.env.production.template
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform/
+.terraform.lock.hcl
+infra/certbot/conf/
+infra/certbot/www/
+infra/monitoring/grafana/data/
+backups/
+

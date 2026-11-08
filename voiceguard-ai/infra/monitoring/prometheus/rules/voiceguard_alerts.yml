@@ -1,0 +1,202 @@
+groups:
+
+  # ── Infrastructure Alerts ────────────────────────────────────────────────
+  - name: infrastructure
+    rules:
+      - alert: HostHighCPU
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High CPU on {{ $labels.instance }}"
+          description: "CPU usage > 85% for 5+ minutes (current: {{ $value | humanize }}%)"
+
+      - alert: HostCriticalCPU
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical CPU on {{ $labels.instance }}"
+          description: "CPU usage > 95% for 2+ minutes (current: {{ $value | humanize }}%)"
+
+      - alert: HostOutOfMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Out of memory on {{ $labels.instance }}"
+          description: "Less than 10% memory available"
+
+      - alert: HostDiskUsageCritical
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Disk almost full on {{ $labels.instance }}"
+          description: "Less than 10% disk space available on root filesystem"
+
+      - alert: HostDiskUsageWarning
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Disk usage warning on {{ $labels.instance }}"
+          description: "Less than 20% disk space available"
+
+  # ── Application Alerts ───────────────────────────────────────────────────
+  - name: voiceguard-backend
+    rules:
+      - alert: BackendDown
+        expr: up{job="voiceguard-backend"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "VoiceGuard backend is DOWN"
+          description: "Backend health endpoint is unreachable"
+
+      - alert: BackendHighErrorRate
+        expr: >
+          (
+            sum(rate(http_requests_total{job="voiceguard-backend", status=~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{job="voiceguard-backend"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High backend error rate"
+          description: "Backend 5xx error rate > 5% for 5+ minutes (current: {{ $value | humanizePercentage }})"
+
+      - alert: BackendHighLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="voiceguard-backend"}[5m])) > 2.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High API latency"
+          description: "P95 API latency > 2s for 5+ minutes (current: {{ $value | humanizeDuration }})"
+
+      - alert: BackendCriticalLatency
+        expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job="voiceguard-backend"}[5m])) > 10.0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical API latency"
+          description: "P95 API latency > 10s for 2+ minutes"
+
+      - alert: ActiveAudioSessionsHigh
+        expr: voiceguard_active_audio_sessions > 50
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of active audio sessions"
+          description: "{{ $value }} concurrent audio sessions — may approach capacity"
+
+  # ── Database Alerts ───────────────────────────────────────────────────────
+  - name: postgresql
+    rules:
+      - alert: PostgreSQLDown
+        expr: pg_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is DOWN"
+          description: "Cannot connect to PostgreSQL"
+
+      - alert: PostgreSQLHighConnections
+        expr: (pg_stat_activity_count / pg_settings_max_connections) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL connection pool near limit"
+          description: "Using {{ $value | humanizePercentage }} of max connections"
+
+      - alert: PostgreSQLSlowQueries
+        expr: rate(pg_stat_activity_max_tx_duration{datname!~"template.*"}[1m]) > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Long-running PostgreSQL transactions"
+          description: "Transactions running > 60s detected"
+
+      - alert: PostgreSQLStorageGrowthAlert
+        expr: predict_linear(pg_database_size_bytes[6h], 7*24*3600) > 50 * 1024 * 1024 * 1024
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "PostgreSQL storage projected to exceed 50GB in 7 days"
+          description: "Database growth rate requires attention"
+
+  # ── Redis Alerts ──────────────────────────────────────────────────────────
+  - name: redis
+    rules:
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is DOWN"
+          description: "Cannot connect to Redis"
+
+      - alert: RedisHighMemoryUsage
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes) > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis memory > 85%"
+          description: "Redis using {{ $value | humanizePercentage }} of max memory — eviction risk"
+
+      - alert: RedisCriticalMemory
+        expr: (redis_memory_used_bytes / redis_memory_max_bytes) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis memory critical (>95%)"
+          description: "Redis eviction causing data loss risk"
+
+      - alert: RedisConnectionsHigh
+        expr: redis_connected_clients > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis high connection count"
+          description: "{{ $value }} connected Redis clients"
+
+  # ── TLS Certificate Alerts ────────────────────────────────────────────────
+  - name: tls
+    rules:
+      - alert: TLSCertExpiringSoon
+        expr: (ssl_certificate_expiry_seconds - time()) < 14 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate expires in < 14 days"
+          description: "Certificate expires on {{ $value | humanizeTimestamp }}"
+
+      - alert: TLSCertExpiryCritical
+        expr: (ssl_certificate_expiry_seconds - time()) < 3 * 24 * 3600
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "TLS certificate expires in < 3 days — URGENT"
+          description: "Certificate nearly expired — renew immediately"
+

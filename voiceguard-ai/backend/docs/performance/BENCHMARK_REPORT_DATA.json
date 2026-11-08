@@ -1,0 +1,42 @@
+{
+  "cache_set_ms": {
+    "p50": 0.001,
+    "p95": 0.0034,
+    "mean": 0.0051
+  },
+  "cache_get_hit_ms": {
+    "p50": 0.0007,
+    "p95": 0.001,
+    "mean": 0.0008
+  },
+  "cache_build_key_ms": {
+    "p50": 0.0009,
+    "p95": 0.001,
+    "mean": 0.00085
+  },
+  "ring_buffer_write_ms": {
+    "p50": 0.0009,
+    "p95": 0.0013,
+    "mean": 0.001
+  },
+  "ring_buffer_read_ms": {
+    "p50": 0.004,
+    "p95": 0.0046,
+    "mean": 0.0046
+  },
+  "feature_extraction_ms": {
+    "p50": 0.0879,
+    "p95": 0.1484,
+    "mean": 0.1111
+  },
+  "thread_pool_dispatch_ms": {
+    "p50": 0.06,
+    "p95": 0.14,
+    "mean": 0.11
+  },
+  "stream_ingest_ms": {
+    "p50": 0.1344,
+    "p95": 0.2588,
+    "mean": 0.1485
+  }
+}

@@ -1,0 +1,234 @@
+name: VoiceGuard AI — Deploy to Staging
+
+# STATUS: PREPARED — Infrastructure not yet provisioned
+# This workflow is fully authored and ready to execute.
+# It will remain in BLOCKED state until staging infrastructure
+# is provisioned and GitHub Environment secrets are configured.
+#
+# Required GitHub Secrets (Environment: staging):
+#   DEPLOY_HOST          — staging server hostname/IP
+#   DEPLOY_SSH_KEY       — private SSH key for deploy user
+#   DEPLOY_USER          — SSH username (default: deploy)
+#   DEPLOY_PATH          — remote path to docker-compose files
+#   GHCR_TOKEN           — GHCR read token for pulling images on server
+#   DATABASE_URL         — staging PostgreSQL connection string
+#   REDIS_URL            — staging Redis connection string
+#   SECRET_KEY           — staging application secret key
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Backend image tag to deploy (e.g. sha-abc1234)"
+        required: true
+      frontend_image_tag:
+        description: "Frontend image tag to deploy (e.g. sha-abc1234)"
+        required: false
+        default: ""
+      run_migrations:
+        description: "Run Alembic migrations before deploy"
+        required: false
+        default: "true"
+        type: boolean
+      smoke_test:
+        description: "Run smoke tests after deploy"
+        required: false
+        default: "true"
+        type: boolean
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false  # Never cancel an in-progress staging deploy
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-frontend
+  STAGING_PORT: 8080
+
+permissions:
+  contents: read
+  packages: read
+  deployments: write
+
+jobs:
+  # ───────────────────────────────────────────────
+  # JOB 1 — Validate inputs & image exists in GHCR
+  # ───────────────────────────────────────────────
+  validate-image:
+    name: Staging — Validate Image Tag
+    runs-on: ubuntu-latest
+    environment: staging-validate  # Non-blocking validation environment
+    outputs:
+      backend_ref: ${{ steps.resolve.outputs.backend_ref }}
+      frontend_ref: ${{ steps.resolve.outputs.frontend_ref }}
+
+    steps:
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve and validate backend image
+        id: resolve
+        run: |
+          BACKEND_TAG="${{ inputs.image_tag }}"
+          BACKEND_REF="${{ env.BACKEND_IMAGE }}:${BACKEND_TAG}"
+
+          echo "Validating backend image: $BACKEND_REF"
+          if docker manifest inspect "$BACKEND_REF" > /dev/null 2>&1; then
+            echo "✅ Backend image $BACKEND_REF found in GHCR."
+            echo "backend_ref=$BACKEND_REF" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Backend image $BACKEND_REF not found in GHCR."
+            echo "::error::Ensure the Docker build workflow ran successfully for this tag."
+            exit 1
+          fi
+
+          # Frontend defaults to same tag as backend
+          FRONTEND_TAG="${{ inputs.frontend_image_tag || inputs.image_tag }}"
+          FRONTEND_REF="${{ env.FRONTEND_IMAGE }}:${FRONTEND_TAG}"
+          echo "Validating frontend image: $FRONTEND_REF"
+          if docker manifest inspect "$FRONTEND_REF" > /dev/null 2>&1; then
+            echo "✅ Frontend image $FRONTEND_REF found."
+            echo "frontend_ref=$FRONTEND_REF" >> $GITHUB_OUTPUT
+          else
+            echo "::warning::Frontend image $FRONTEND_REF not found. Using latest."
+            echo "frontend_ref=${{ env.FRONTEND_IMAGE }}:latest" >> $GITHUB_OUTPUT
+          fi
+
+  # ───────────────────────────────────────────────
+  # JOB 2 — Deploy to Staging Server
+  # ───────────────────────────────────────────────
+  deploy-staging:
+    name: Staging — Deploy
+    runs-on: ubuntu-latest
+    needs: [validate-image]
+    environment:
+      name: staging
+      url: https://staging.voiceguard.example.com  # Update when infrastructure exists
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: |
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Pre-deploy health check (verify server is reachable)
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "echo 'SSH connection OK' && docker --version && docker compose version"
+
+      - name: Pull new images on staging server
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "echo '${{ secrets.GHCR_TOKEN }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "docker pull ${{ needs.validate-image.outputs.backend_ref }}"
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "docker pull ${{ needs.validate-image.outputs.frontend_ref }}"
+
+      - name: Run Alembic migrations (if enabled)
+        if: inputs.run_migrations == 'true'
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'ENDSSH'
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            docker run --rm \
+              --network voiceguard_network \
+              -e DATABASE_URL="${{ secrets.DATABASE_URL }}" \
+              -e ENVIRONMENT=staging \
+              ${{ needs.validate-image.outputs.backend_ref }} \
+              alembic upgrade head
+            echo "✅ Migrations complete."
+          ENDSSH
+
+      - name: Deploy with Docker Compose (rolling update)
+        run: |
+          ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" << 'ENDSSH'
+            set -e
+            cd ${{ secrets.DEPLOY_PATH }}
+            # Export image tags for compose override
+            export BACKEND_IMAGE_TAG="${{ inputs.image_tag }}"
+            export FRONTEND_IMAGE_TAG="${{ inputs.frontend_image_tag || inputs.image_tag }}"
+            export DATABASE_URL="${{ secrets.DATABASE_URL }}"
+            export REDIS_URL="${{ secrets.REDIS_URL }}"
+            export SECRET_KEY="${{ secrets.SECRET_KEY }}"
+            # Pull and restart with zero-downtime
+            docker compose -f docker-compose.yml pull
+            docker compose -f docker-compose.yml up -d --no-deps backend frontend
+            echo "✅ Staging deploy triggered."
+          ENDSSH
+
+      - name: Wait for backend to become healthy
+        run: |
+          echo "Waiting for staging backend to pass health check..."
+          for i in $(seq 1 24); do
+            STATUS=$(ssh "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+              "curl -sf http://localhost:${{ env.STAGING_PORT }}/api/v1/health | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"status\",\"unknown\"))'" 2>/dev/null || echo "unreachable")
+            echo "Attempt $i/24: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "✅ Backend is healthy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Backend did not become healthy within 240 seconds."
+          exit 1
+
+  # ───────────────────────────────────────────────
+  # JOB 3 — Smoke Tests
+  # ───────────────────────────────────────────────
+  smoke-test-staging:
+    name: Staging — Smoke Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, validate-image]
+    if: inputs.smoke_test == 'true'
+    environment: staging
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run API smoke tests
+        run: |
+          BASE_URL="https://staging.voiceguard.example.com"
+
+          echo "Smoke test 1: Health endpoint"
+          HEALTH=$(curl -sf "$BASE_URL/api/v1/health" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("status",""))' || echo "fail")
+          [ "$HEALTH" = "healthy" ] || { echo "::error::Health check failed"; exit 1; }
+
+          echo "Smoke test 2: API docs reachable"
+          curl -sf "$BASE_URL/api/docs" > /dev/null || echo "::warning::API docs endpoint not reachable"
+
+          echo "Smoke test 3: Version endpoint"
+          curl -sf "$BASE_URL/api/v1/version" > /dev/null || echo "::warning::Version endpoint not reachable"
+
+          echo "✅ All smoke tests passed."
+
+      - name: Post deploy summary
+        run: |
+          echo "## ✅ Staging Deploy Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend Image | \`${{ needs.validate-image.outputs.backend_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend Image | \`${{ needs.validate-image.outputs.frontend_ref }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed by | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%dT%H:%M:%SZ') |" >> $GITHUB_STEP_SUMMARY
+

@@ -1,0 +1,65 @@
+# =============================================================================
+# VoiceGuard AI — Docker Compose Automated Testing Configuration
+# Phase 30: Dockerization (SIH26104)
+# Usage: docker-compose -f docker-compose.test.yml up --abort-on-container-exit --exit-code-from test-runner
+# =============================================================================
+
+name: voiceguard-test
+
+services:
+  test-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: voiceguard_test
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+    tmpfs:
+      - /var/lib/postgresql/data  # High-speed ephemeral in-memory storage for test runs
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d voiceguard_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  test-redis:
+    image: redis:7-alpine
+    command: redis-server --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    environment:
+      APP_ENV: test
+      DATABASE_URL: postgresql+psycopg2://test_user:test_password@test-db:5432/voiceguard_test
+      REDIS_URL: redis://test-redis:6379/1
+      SECRET_KEY: test_secret_key_at_least_32_characters_long_ci
+      LOG_LEVEL: ERROR
+      PYTHONPATH: /app/backend:/app/ai-engine
+    depends_on:
+      test-db:
+        condition: service_healthy
+      test-redis:
+        condition: service_healthy
+    command: >
+      sh -c "
+        python run_migrations.py &&
+        python -m pytest tests/ \
+          -v \
+          --tb=short \
+          --junitxml=/app/storage/test-results.xml \
+          -p no:warnings
+      "
+    volumes:
+      - ./backend/tests:/app/backend/tests:ro
+      - test_artifacts:/app/storage
+
+volumes:
+  test_artifacts:
+    driver: local
+

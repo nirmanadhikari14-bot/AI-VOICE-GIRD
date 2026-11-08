@@ -1,0 +1,15 @@
+# Backend specific .dockerignore
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+.pytest_cache/
+*.db
+*.sqlite3
+test-results.xml
+*.log
+.coverage
+htmlcov/
+

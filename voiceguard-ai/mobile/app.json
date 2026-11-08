@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "VoiceGuard AI Mobile",
+    "slug": "voiceguard-ai-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "backgroundColor": "#0a0b0f"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ai.voiceguard.security"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#0a0b0f"
+      },
+      "package": "ai.voiceguard.security"
+    },
+    "extra": {
+      "apiBaseUrl": "http://127.0.0.1:8000"
+    }
+  }
+}

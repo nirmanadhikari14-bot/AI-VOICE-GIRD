@@ -1,0 +1,31 @@
+# voiceguard-ci.yml — SUPERSEDED
+#
+# This workflow has been superseded by the modular Phase 31 CI/CD pipeline.
+# It is kept for reference only. The active workflows are:
+#
+#   ci.yml               — Consolidated CI (lint, test, build, migrations)
+#   security-scan.yml    — Security scanning (Gitleaks, Bandit, Trivy, Hadolint)
+#   docker-build.yml     — Docker image build & GHCR publish
+#   deploy-staging.yml   — Staging deployment (manual dispatch)
+#   deploy-production.yml— Production deployment (manual approval gate)
+#   release.yml          — Release management with SBOM & provenance
+#
+# DO NOT trigger this workflow. The path filters below are intentionally
+# set to a non-existent path to disable it without deleting the file.
+
+name: "[SUPERSEDED] VoiceGuard AI CI/CD"
+
+on:
+  push:
+    paths:
+      - "_superseded_do_not_trigger/**"
+
+jobs:
+  superseded:
+    name: This workflow is superseded
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notice
+        run: |
+          echo "This workflow has been superseded by the Phase 31 modular CI/CD pipeline."
+          echo "See .github/workflows/ci.yml and related files."

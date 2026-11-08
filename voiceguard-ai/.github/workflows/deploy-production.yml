@@ -1,0 +1,367 @@
+name: VoiceGuard AI — Deploy to Production
+
+# STATUS: PREPARED — Infrastructure not yet provisioned
+# SAFETY: Production deploys require MANUAL APPROVAL via GitHub Environment protection.
+# This workflow CANNOT auto-deploy. A human reviewer must approve each deployment.
+#
+# Required GitHub Secrets (Environment: production):
+#   PROD_DEPLOY_HOST     — production server hostname/IP
+#   PROD_DEPLOY_SSH_KEY  — private SSH key for prod deploy user
+#   PROD_DEPLOY_USER     — SSH username
+#   PROD_DEPLOY_PATH     — remote path to docker-compose files
+#   PROD_GHCR_TOKEN      — GHCR read token
+#   PROD_DATABASE_URL    — production PostgreSQL connection string
+#   PROD_REDIS_URL       — production Redis connection string
+#   PROD_SECRET_KEY      — production application secret key
+#   BACKUP_S3_BUCKET     — S3/GCS bucket for pre-deploy DB backups
+#
+# Required GitHub Environment Protection Rules (production):
+#   - Required reviewers: at least 2 from production-approvers team
+#   - Deployment branches: main only
+#   - Wait timer: 5 minutes (optional cooldown)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: "Backend image digest to deploy (sha256:...) — IMMUTABLE"
+        required: true
+      frontend_image_digest:
+        description: "Frontend image digest (sha256:...) — leave blank to use same as backend tag"
+        required: false
+        default: ""
+      deployment_reason:
+        description: "Reason for this production deployment"
+        required: true
+      skip_backup:
+        description: "Skip pre-deploy database backup (DANGEROUS)"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false  # NEVER cancel a production deploy
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-frontend
+
+permissions:
+  contents: read
+  packages: read
+  deployments: write
+  id-token: write  # For OIDC-based cloud auth if used
+
+jobs:
+  # ───────────────────────────────────────────────
+  # JOB 0 — Pre-flight: branch + digest validation
+  # ───────────────────────────────────────────────
+  preflight:
+    name: Production — Pre-flight Checks
+    runs-on: ubuntu-latest
+    # Only allow production deploys from main branch
+    if: github.ref == 'refs/heads/main'
+    outputs:
+      backend_ref: ${{ steps.resolve.outputs.backend_ref }}
+      deploy_timestamp: ${{ steps.resolve.outputs.deploy_timestamp }}
+
+    steps:
+      - name: Reject non-main branch
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Production deployments are only allowed from the main branch."
+          echo "::error::Current ref: ${{ github.ref }}"
+          exit 1
+
+      - name: Validate image digest format
+        run: |
+          DIGEST="${{ inputs.image_digest }}"
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::image_digest must be in format sha256:<64 hex chars>. Got: $DIGEST"
+            echo "::error::Find the correct digest from the Docker Build workflow output."
+            exit 1
+          fi
+          echo "✅ Image digest format is valid."
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify image digest exists in GHCR
+        id: resolve
+        run: |
+          BACKEND_REF="${{ env.BACKEND_IMAGE }}@${{ inputs.image_digest }}"
+          echo "Verifying: $BACKEND_REF"
+          if ! docker manifest inspect "$BACKEND_REF" > /dev/null 2>&1; then
+            echo "::error::Image $BACKEND_REF not found in GHCR."
+            echo "::error::Verify that the Docker build workflow published this image."
+            exit 1
+          fi
+          echo "✅ Image digest verified in GHCR."
+          echo "backend_ref=$BACKEND_REF" >> $GITHUB_OUTPUT
+          echo "deploy_timestamp=$(date -u '+%Y%m%dT%H%M%SZ')" >> $GITHUB_OUTPUT
+
+  # ───────────────────────────────────────────────
+  # JOB 1 — MANUAL APPROVAL GATE
+  # GitHub Environment protection rules block execution
+  # here until required reviewers approve.
+  # ───────────────────────────────────────────────
+  require-approval:
+    name: Production — Await Manual Approval
+    runs-on: ubuntu-latest
+    needs: [preflight]
+    environment:
+      name: production  # <-- GitHub Environment with required reviewers configured
+      url: https://voiceguard.example.com
+
+    steps:
+      - name: Log approval granted
+        run: |
+          echo "## 🔐 Production Deployment Approved" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Approved by | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Digest | \`${{ inputs.image_digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${{ inputs.deployment_reason }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%dT%H:%M:%SZ') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ Proceeding with production deployment..."
+
+  # ───────────────────────────────────────────────
+  # JOB 2 — Pre-deploy Database Backup
+  # ───────────────────────────────────────────────
+  pre-deploy-backup:
+    name: Production — Database Backup
+    runs-on: ubuntu-latest
+    needs: [require-approval, preflight]
+    if: inputs.skip_backup != 'true'
+    environment: production
+
+    steps:
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.PROD_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run pg_dump backup
+        run: |
+          BACKUP_FILENAME="voiceguard_prod_backup_${{ needs.preflight.outputs.deploy_timestamp }}.sql.gz"
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" \
+            "pg_dump \${{ secrets.PROD_DATABASE_URL }} | gzip > /tmp/$BACKUP_FILENAME && echo 'Backup created: $BACKUP_FILENAME'"
+          echo "BACKUP_FILE=$BACKUP_FILENAME" >> $GITHUB_ENV
+
+      - name: Upload backup to object storage
+        # Assumes aws CLI or gsutil is configured; adjust for your cloud provider
+        run: |
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" \
+            "gsutil cp /tmp/${{ env.BACKUP_FILE }} gs://${{ secrets.BACKUP_S3_BUCKET }}/database/ && rm /tmp/${{ env.BACKUP_FILE }}"
+          echo "✅ Backup uploaded to gs://${{ secrets.BACKUP_S3_BUCKET }}/database/${{ env.BACKUP_FILE }}"
+        continue-on-error: false  # Fail fast if backup fails
+
+  # ───────────────────────────────────────────────
+  # JOB 3 — Run Alembic Migrations
+  # ───────────────────────────────────────────────
+  run-migrations:
+    name: Production — Run Migrations
+    runs-on: ubuntu-latest
+    needs: [pre-deploy-backup, preflight]
+    environment: production
+
+    steps:
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.PROD_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Run Alembic upgrade head
+        run: |
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" << 'ENDSSH'
+            set -e
+            # Use a migration lock to prevent concurrent migrations
+            LOCK_FILE="/tmp/voiceguard_migration.lock"
+            if [ -f "$LOCK_FILE" ]; then
+              echo "::error::Another migration is in progress. Aborting."
+              exit 1
+            fi
+            touch "$LOCK_FILE"
+            trap "rm -f $LOCK_FILE" EXIT
+
+            echo "Running Alembic upgrade head..."
+            docker run --rm \
+              --network voiceguard_network \
+              -e DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+              -e ENVIRONMENT=production \
+              ${{ env.BACKEND_IMAGE }}@${{ inputs.image_digest }} \
+              alembic upgrade head
+
+            echo "✅ Migrations complete."
+          ENDSSH
+
+  # ───────────────────────────────────────────────
+  # JOB 4 — Deploy Production (immutable digest)
+  # ───────────────────────────────────────────────
+  deploy-production:
+    name: Production — Deploy
+    runs-on: ubuntu-latest
+    needs: [run-migrations, preflight]
+    environment: production
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.PROD_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Pull images by digest
+        run: |
+          # Use env var to avoid secret exposure in process arguments
+          GHCR_TOKEN="${{ secrets.PROD_GHCR_TOKEN }}"
+          ACTOR="${{ github.actor }}"
+          BACKEND_REF="${{ env.BACKEND_IMAGE }}@${{ inputs.image_digest }}"
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" \
+            "docker login ghcr.io -u $ACTOR --password-stdin <<< \"\$GHCR_TOKEN\""
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" \
+            "docker pull $BACKEND_REF"
+
+      - name: Deploy with Docker Compose (rolling)
+        id: deploy
+        run: |
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" << 'ENDSSH'
+            set -e
+            cd ${{ secrets.PROD_DEPLOY_PATH }}
+            export BACKEND_IMAGE_DIGEST="${{ inputs.image_digest }}"
+            export DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}"
+            export REDIS_URL="${{ secrets.PROD_REDIS_URL }}"
+            export SECRET_KEY="${{ secrets.PROD_SECRET_KEY }}"
+            export ENVIRONMENT=production
+            docker compose -f docker-compose.prod.yml up -d --no-deps backend
+            echo "✅ Production deploy triggered."
+          ENDSSH
+
+  # ───────────────────────────────────────────────
+  # JOB 5 — Health Verification
+  # ───────────────────────────────────────────────
+  health-verify:
+    name: Production — Health Verification
+    runs-on: ubuntu-latest
+    needs: [deploy-production, preflight]
+    environment: production
+    outputs:
+      health_status: ${{ steps.check.outputs.status }}
+
+    steps:
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.PROD_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Wait and verify health
+        id: check
+        run: |
+          echo "Verifying production backend health..."
+          for i in $(seq 1 30); do
+            STATUS=$(ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" \
+              "curl -sf http://localhost:8000/api/v1/health | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get(\"status\",\"unknown\"))'" 2>/dev/null || echo "unreachable")
+            echo "Attempt $i/30: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "status=healthy" >> $GITHUB_OUTPUT
+              echo "✅ Production is healthy."
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          echo "::error::Production did not become healthy within 300 seconds."
+          exit 1
+
+  # ───────────────────────────────────────────────
+  # JOB 6 — Automatic Rollback on Failure
+  # ───────────────────────────────────────────────
+  rollback-on-failure:
+    name: Production — Rollback (auto)
+    runs-on: ubuntu-latest
+    needs: [health-verify, deploy-production]
+    if: failure() && needs.health-verify.outputs.health_status == 'unhealthy'
+    environment: production
+
+    steps:
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+
+      - name: Add server to known_hosts
+        run: ssh-keyscan -H "${{ secrets.PROD_DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rollback to previous image
+        run: |
+          echo "🚨 Health check failed. Initiating automatic rollback..."
+          ssh "${{ secrets.PROD_DEPLOY_USER }}@${{ secrets.PROD_DEPLOY_HOST }}" << 'ENDSSH'
+            set -e
+            cd ${{ secrets.PROD_DEPLOY_PATH }}
+            # Roll back to the previously running container
+            PREV_IMAGE=$(docker ps -a --filter "name=voiceguard_backend" --format "{{.Image}}" | sed -n '2p')
+            if [ -z "$PREV_IMAGE" ]; then
+              echo "::error::No previous image found for rollback."
+              exit 1
+            fi
+            echo "Rolling back to: $PREV_IMAGE"
+            docker compose -f docker-compose.prod.yml stop backend
+            docker run -d \
+              --name voiceguard_backend_rollback \
+              --network voiceguard_network \
+              -e DATABASE_URL="${{ secrets.PROD_DATABASE_URL }}" \
+              -e REDIS_URL="${{ secrets.PROD_REDIS_URL }}" \
+              "$PREV_IMAGE"
+            echo "⚠️ Rollback complete. Manual intervention required."
+          ENDSSH
+
+      - name: Notify rollback
+        run: |
+          echo "## 🚨 PRODUCTION ROLLBACK TRIGGERED" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Failed image digest: \`${{ inputs.image_digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Automatic rollback executed." >> $GITHUB_STEP_SUMMARY
+          echo "**Manual intervention required to stabilize production.**" >> $GITHUB_STEP_SUMMARY
+
+  # ───────────────────────────────────────────────
+  # JOB 7 — Final Summary
+  # ───────────────────────────────────────────────
+  deploy-summary:
+    name: Production — Deploy Summary
+    runs-on: ubuntu-latest
+    needs: [health-verify, deploy-production, preflight]
+    if: success()
+
+    steps:
+      - name: Write deploy summary
+        run: |
+          echo "## ✅ Production Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Deployed by | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Image Digest | \`${{ inputs.image_digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${{ inputs.deployment_reason }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Health | ✅ healthy |" >> $GITHUB_STEP_SUMMARY
+          echo "| Timestamp | $(date -u '+%Y-%m-%dT%H:%M:%SZ') |" >> $GITHUB_STEP_SUMMARY

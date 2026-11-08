@@ -1,0 +1,55 @@
+# =============================================================================
+# VoiceGuard AI — Docker Compose GPU Acceleration Override
+# Phase 30: Dockerization (SIH26104)
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.gpu.yml up
+# =============================================================================
+
+services:
+  backend:
+    environment:
+      VOICEGUARD_DEVICE: cuda
+      TORCH_DEVICE: cuda
+      CUDA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      MODEL_CONCURRENCY: 4
+      BATCH_INFERENCE_SIZE: 16
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ai-worker:
+    build:
+      context: .
+      dockerfile: docker/ai-engine/Dockerfile
+    restart: unless-stopped
+    environment:
+      VOICEGUARD_DEVICE: cuda
+      TORCH_DEVICE: cuda
+      CUDA_VISIBLE_DEVICES: "0"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      DATABASE_URL: postgresql+psycopg2://${DB_USER:-voiceguard_user}:${DB_PASSWORD:-voiceguard_dev_password}@db:5432/${DB_NAME:-voiceguard}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-voiceguard_redis_pass}@redis:6379/0
+      MODEL_CACHE_DIR: /app/models
+    volumes:
+      - model_cache:/app/models
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend-network
+      - data-network
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

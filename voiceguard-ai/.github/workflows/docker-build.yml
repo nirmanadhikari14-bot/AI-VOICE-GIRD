@@ -1,0 +1,265 @@
+name: VoiceGuard AI — Docker Build & Publish
+
+on:
+  workflow_run:
+    workflows: ["VoiceGuard AI — Consolidated CI"]
+    branches: [main]
+    types: [completed]
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
+  workflow_dispatch:
+    inputs:
+      push_images:
+        description: "Push images to GHCR"
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel in-progress image builds
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-frontend
+
+permissions:
+  contents: read
+  packages: write     # Required for GHCR push
+  security-events: write  # Required for Trivy SARIF upload
+  id-token: write     # Required for build provenance attestation
+
+jobs:
+  # ───────────────────────────────────────────────
+  # GUARD — Only proceed if CI passed
+  # ───────────────────────────────────────────────
+  ci-guard:
+    name: Guard — Verify CI passed
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    steps:
+      - name: CI status check
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_run" ]; then
+            echo "Triggered by CI workflow. Conclusion: ${{ github.event.workflow_run.conclusion }}"
+            if [ "${{ github.event.workflow_run.conclusion }}" != "success" ]; then
+              echo "::error::CI workflow did not succeed. Aborting Docker build."
+              exit 1
+            fi
+          fi
+          echo "✅ Proceeding with Docker build."
+
+  # ───────────────────────────────────────────────
+  # JOB 1 — Build & Push Backend Image
+  # ───────────────────────────────────────────────
+  build-backend:
+    name: Docker — Build & Push Backend
+    runs-on: ubuntu-latest
+    needs: [ci-guard]
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-metadata: ${{ steps.meta.outputs.json }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: image=moby/buildkit:latest
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.BACKEND_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/develop' }}
+          labels: |
+            org.opencontainers.image.title=VoiceGuard Backend
+            org.opencontainers.image.description=VoiceGuard AI backend API service
+            org.opencontainers.image.vendor=VoiceGuard AI Team
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            maintainer=VoiceGuard AI Team
+
+      - name: Build and push backend image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: voiceguard-ai
+          file: voiceguard-ai/Dockerfile.backend
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || inputs.push_images == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+          build-args: |
+            BUILD_DATE=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.created'] }}
+            VCS_REF=${{ github.sha }}
+            VERSION=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+
+      - name: Output image digest
+        run: |
+          echo "Backend image digest: ${{ steps.build.outputs.digest }}"
+          echo "BACKEND_DIGEST=${{ steps.build.outputs.digest }}" >> $GITHUB_ENV
+
+  # ───────────────────────────────────────────────
+  # JOB 2 — Build & Push Frontend Image
+  # ───────────────────────────────────────────────
+  build-frontend:
+    name: Docker — Build & Push Frontend
+    runs-on: ubuntu-latest
+    needs: [ci-guard]
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.FRONTEND_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/develop' }}
+          labels: |
+            org.opencontainers.image.title=VoiceGuard Frontend
+            org.opencontainers.image.description=VoiceGuard AI React frontend
+            org.opencontainers.image.vendor=VoiceGuard AI Team
+
+      - name: Build and push frontend image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: voiceguard-ai/frontend
+          file: voiceguard-ai/Dockerfile.frontend
+          push: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || inputs.push_images == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+  # ───────────────────────────────────────────────
+  # JOB 3 — Trivy Image Scan — Backend
+  # ───────────────────────────────────────────────
+  trivy-backend:
+    name: Security — Trivy Backend Image
+    runs-on: ubuntu-latest
+    needs: [build-backend]
+    if: needs.build-backend.outputs.image-digest != ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan backend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.BACKEND_IMAGE }}@${{ needs.build-backend.outputs.image-digest }}
+          format: sarif
+          output: trivy-backend.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-backend.sarif
+          category: trivy-backend-image
+
+      - name: Fail on CRITICAL backend vulnerabilities
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.BACKEND_IMAGE }}@${{ needs.build-backend.outputs.image-digest }}
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1
+
+  # ───────────────────────────────────────────────
+  # JOB 4 — Trivy Image Scan — Frontend (warn only)
+  # ───────────────────────────────────────────────
+  trivy-frontend:
+    name: Security — Trivy Frontend Image
+    runs-on: ubuntu-latest
+    needs: [build-frontend]
+    if: needs.build-frontend.outputs.image-digest != ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan frontend image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.FRONTEND_IMAGE }}@${{ needs.build-frontend.outputs.image-digest }}
+          format: sarif
+          output: trivy-frontend.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0  # Frontend (nginx) scans are advisory only
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-frontend.sarif
+          category: trivy-frontend-image
+
+  # ───────────────────────────────────────────────
+  # JOB 5 — Summary: Output digests for downstream
+  # ───────────────────────────────────────────────
+  image-summary:
+    name: Docker — Image Summary
+    runs-on: ubuntu-latest
+    needs: [build-backend, build-frontend, trivy-backend, trivy-frontend]
+    if: always()
+    steps:
+      - name: Summarize published images
+        run: |
+          echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Image    | Digest | Security |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Backend  | \`${{ needs.build-backend.outputs.image-digest }}\` | ${{ needs.trivy-backend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Frontend | \`${{ needs.build-frontend.outputs.image-digest }}\` | ${{ needs.trivy-frontend.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Registry: \`${{ env.REGISTRY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+

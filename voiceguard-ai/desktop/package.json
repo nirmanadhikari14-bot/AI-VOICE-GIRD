@@ -1,0 +1,36 @@
+{
+  "name": "voiceguard-windows-console",
+  "version": "1.0.0",
+  "description": "VoiceGuard AI - Windows Security Console (Phase 23)",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:all": "npm run build && npm run build:electron",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "start": "electron dist-electron/main.js"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.67.1",
+    "clsx": "^2.1.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.13.5",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^34.3.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.7.3",
+    "vite": "^6.2.0"
+  }
+}
+

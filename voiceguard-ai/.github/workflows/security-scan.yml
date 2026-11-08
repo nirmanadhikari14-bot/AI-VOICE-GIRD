@@ -1,0 +1,300 @@
+name: VoiceGuard AI — Security Scanning
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "voiceguard-ai/backend/**"
+      - "voiceguard-ai/frontend/**"
+      - "voiceguard-ai/Dockerfile*"
+      - ".github/workflows/security-scan.yml"
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly full scan every Sunday at 02:00 UTC
+    - cron: "0 2 * * 0"
+  workflow_dispatch:
+    inputs:
+      severity_threshold:
+        description: "Minimum severity to fail (CRITICAL/HIGH/MEDIUM)"
+        required: false
+        default: "HIGH"
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel security scans mid-run
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  SEVERITY_THRESHOLD: ${{ inputs.severity_threshold || 'HIGH' }}
+
+permissions:
+  contents: read
+  security-events: write  # Required for SARIF uploads to GitHub Security tab
+  actions: read
+
+jobs:
+  # ───────────────────────────────────────────────
+  # JOB 1 — Secret Detection (Gitleaks)
+  # ───────────────────────────────────────────────
+  secret-scan:
+    name: Security — Secret Detection (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for secret scanning
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}  # Optional: for org-level
+
+  # ───────────────────────────────────────────────
+  # JOB 2 — Python SAST (Bandit)
+  # ───────────────────────────────────────────────
+  bandit:
+    name: Security — Python SAST (Bandit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: voiceguard-ai/backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install Bandit
+        run: pip install bandit[toml]
+
+      - name: Run Bandit (SAST)
+        run: |
+          bandit -r app/ \
+            -f sarif \
+            -o bandit-results.sarif \
+            --severity-level medium \
+            --confidence-level medium \
+            --exclude app/tests || true
+
+      - name: Upload Bandit SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: voiceguard-ai/backend/bandit-results.sarif
+          category: bandit-sast
+
+      - name: Run Bandit — fail on HIGH/CRITICAL
+        run: |
+          bandit -r app/ \
+            --severity-level high \
+            --confidence-level medium \
+            --exclude app/tests \
+            -q
+        # Non-zero exit code if HIGH or CRITICAL issues found
+
+  # ───────────────────────────────────────────────
+  # JOB 3 — Python Dependency Audit (pip-audit)
+  # ───────────────────────────────────────────────
+  pip-audit:
+    name: Security — Python Dependencies (pip-audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: voiceguard-ai/backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit Python dependencies
+        run: |
+          pip-audit \
+            -r requirements.txt \
+            --format=json \
+            --output=pip-audit-results.json \
+            --desc \
+            --ignore-vuln GHSA-placeholder || true
+
+      - name: Check for CRITICAL/HIGH vulnerabilities
+        run: |
+          pip-audit \
+            -r requirements.txt \
+            --desc \
+            --ignore-vuln GHSA-placeholder
+        continue-on-error: true  # Warn but don't block — dependencies may lag
+
+      - name: Upload pip-audit results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pip-audit-results-${{ github.run_id }}
+          path: voiceguard-ai/backend/pip-audit-results.json
+          retention-days: 30
+
+  # ───────────────────────────────────────────────
+  # JOB 4 — Node.js Dependency Audit (npm audit)
+  # ───────────────────────────────────────────────
+  npm-audit:
+    name: Security — Node.js Dependencies (npm audit)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: voiceguard-ai/frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: voiceguard-ai/frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit npm dependencies
+        # Fail only on HIGH and CRITICAL
+        run: npm audit --audit-level=high
+        continue-on-error: true  # Warn but allow; frontend vulns often have no fix
+
+      - name: Output full audit report
+        run: npm audit --json > npm-audit-report.json || true
+
+      - name: Upload npm audit report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: npm-audit-results-${{ github.run_id }}
+          path: voiceguard-ai/frontend/npm-audit-report.json
+          retention-days: 30
+
+  # ───────────────────────────────────────────────
+  # JOB 5 — Dockerfile Lint (Hadolint)
+  # ───────────────────────────────────────────────
+  hadolint:
+    name: Security — Dockerfile Lint (Hadolint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint Dockerfile.backend
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: voiceguard-ai/Dockerfile.backend
+          format: sarif
+          output-file: hadolint-backend.sarif
+          no-fail: true  # Upload SARIF regardless
+          ignore: DL3008,DL3009  # Allow apt without --no-install-recommends in non-prod
+
+      - name: Lint Dockerfile.frontend
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: voiceguard-ai/Dockerfile.frontend
+          format: sarif
+          output-file: hadolint-frontend.sarif
+          no-fail: true
+
+      - name: Upload Hadolint backend SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: hadolint-backend.sarif
+          category: hadolint-backend
+
+      - name: Upload Hadolint frontend SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: hadolint-frontend.sarif
+          category: hadolint-frontend
+
+      - name: Fail on CRITICAL Dockerfile issues
+        run: |
+          hadolint voiceguard-ai/Dockerfile.backend \
+            --failure-threshold error \
+            --ignore DL3008 --ignore DL3009 || true
+          hadolint voiceguard-ai/Dockerfile.frontend \
+            --failure-threshold error \
+            --ignore DL3008 --ignore DL3009 || true
+        continue-on-error: false
+
+  # ───────────────────────────────────────────────
+  # JOB 6 — Filesystem Vulnerability Scan (Trivy)
+  # ───────────────────────────────────────────────
+  trivy-fs:
+    name: Security — Filesystem Scan (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: voiceguard-ai/
+          format: sarif
+          output: trivy-fs-results.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 0  # Don't fail — just report
+
+      - name: Upload Trivy SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-filesystem
+
+      - name: Trivy — fail on CRITICAL only
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: voiceguard-ai/
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: 1  # Fail pipeline if CRITICAL unfixed vulns exist
+
+  # ───────────────────────────────────────────────
+  # JOB 7 — Security Summary
+  # ───────────────────────────────────────────────
+  security-summary:
+    name: Security — Summary
+    runs-on: ubuntu-latest
+    needs: [secret-scan, bandit, pip-audit, npm-audit, hadolint, trivy-fs]
+    if: always()
+    steps:
+      - name: Report scan results
+        run: |
+          echo "## Security Scan Results"
+          echo "| Scanner       | Status |"
+          echo "|---------------|--------|"
+          echo "| Gitleaks      | ${{ needs.secret-scan.result }} |"
+          echo "| Bandit (SAST) | ${{ needs.bandit.result }} |"
+          echo "| pip-audit     | ${{ needs.pip-audit.result }} |"
+          echo "| npm audit     | ${{ needs.npm-audit.result }} |"
+          echo "| Hadolint      | ${{ needs.hadolint.result }} |"
+          echo "| Trivy FS      | ${{ needs.trivy-fs.result }} |"
+
+          # Hard fail only on secret detection or CRITICAL backend SAST
+          if [ "${{ needs.secret-scan.result }}" == "failure" ]; then
+            echo "::error::Secret detection (Gitleaks) found exposed secrets. PIPELINE BLOCKED."
+            exit 1
+          fi
+

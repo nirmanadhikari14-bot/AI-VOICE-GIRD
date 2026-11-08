@@ -1,0 +1,317 @@
+name: VoiceGuard AI — Release Management
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"         # Stable release: v1.2.3
+      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"  # Release candidate: v1.2.3-rc1
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.0.0)"
+        required: true
+      is_prerelease:
+        description: "Mark as pre-release"
+        required: false
+        default: "false"
+        type: boolean
+      generate_sbom:
+        description: "Generate Software Bill of Materials"
+        required: false
+        default: "true"
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel release builds
+
+env:
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-backend
+  FRONTEND_IMAGE: ghcr.io/${{ github.repository_owner }}/voiceguard-frontend
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+
+permissions:
+  contents: write  # Required for creating GitHub Releases
+  packages: write  # Required for GHCR push
+  security-events: write
+  id-token: write  # Required for build provenance attestation
+
+jobs:
+  # ───────────────────────────────────────────────
+  # JOB 1 — Validate release tag & format
+  # ───────────────────────────────────────────────
+  validate-release:
+    name: Release — Validate Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.parse.outputs.version }}
+      is_prerelease: ${{ steps.parse.outputs.is_prerelease }}
+      changelog_ref: ${{ steps.parse.outputs.changelog_ref }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for changelog generation
+
+      - name: Parse release tag
+        id: parse
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          fi
+
+          echo "Release tag: $TAG"
+
+          # Validate semver format
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]]; then
+            echo "::error::Tag $TAG does not match semver format vMAJOR.MINOR.PATCH or vMAJOR.MINOR.PATCH-rcN"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          # Determine pre-release status
+          if [[ "$TAG" == *"-rc"* ]] || [ "${{ inputs.is_prerelease }}" == "true" ]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+          echo "changelog_ref=$TAG" >> $GITHUB_OUTPUT
+          echo "✅ Tag $TAG is valid. Version: $VERSION"
+
+  # ───────────────────────────────────────────────
+  # JOB 2 — Build Release Images
+  # ───────────────────────────────────────────────
+  build-release-images:
+    name: Release — Build & Push Images
+    runs-on: ubuntu-latest
+    needs: [validate-release]
+    outputs:
+      backend-digest: ${{ steps.build-backend.outputs.digest }}
+      frontend-digest: ${{ steps.build-frontend.outputs.digest }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push backend release image
+        id: build-backend
+        uses: docker/build-push-action@v5
+        with:
+          context: voiceguard-ai
+          file: voiceguard-ai/Dockerfile.backend
+          push: true
+          tags: |
+            ${{ env.BACKEND_IMAGE }}:${{ needs.validate-release.outputs.version }}
+            ${{ env.BACKEND_IMAGE }}:v${{ needs.validate-release.outputs.version }}
+            ${{ env.BACKEND_IMAGE }}:${{ needs.validate-release.outputs.is_prerelease == 'false' && 'stable' || 'rc' }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,scope=backend,mode=max
+          build-args: |
+            VERSION=${{ needs.validate-release.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+      - name: Build and push frontend release image
+        id: build-frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: voiceguard-ai/frontend
+          file: voiceguard-ai/Dockerfile.frontend
+          push: true
+          tags: |
+            ${{ env.FRONTEND_IMAGE }}:${{ needs.validate-release.outputs.version }}
+            ${{ env.FRONTEND_IMAGE }}:v${{ needs.validate-release.outputs.version }}
+            ${{ env.FRONTEND_IMAGE }}:${{ needs.validate-release.outputs.is_prerelease == 'false' && 'stable' || 'rc' }}
+          platforms: linux/amd64
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Output release image digests
+        run: |
+          echo "Backend digest:  ${{ steps.build-backend.outputs.digest }}"
+          echo "Frontend digest: ${{ steps.build-frontend.outputs.digest }}"
+
+  # ───────────────────────────────────────────────
+  # JOB 3 — Generate SBOM
+  # ───────────────────────────────────────────────
+  generate-sbom:
+    name: Release — Generate SBOM
+    runs-on: ubuntu-latest
+    needs: [build-release-images, validate-release]
+    if: inputs.generate_sbom != 'false'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM for backend image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.BACKEND_IMAGE }}@${{ needs.build-release-images.outputs.backend-digest }}
+          format: spdx-json
+          output-file: voiceguard-backend-${{ needs.validate-release.outputs.version }}.sbom.json
+          upload-artifact: true
+          artifact-name: sbom-backend-${{ needs.validate-release.outputs.version }}
+
+      - name: Generate SBOM for frontend image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.FRONTEND_IMAGE }}@${{ needs.build-release-images.outputs.frontend-digest }}
+          format: spdx-json
+          output-file: voiceguard-frontend-${{ needs.validate-release.outputs.version }}.sbom.json
+          upload-artifact: true
+          artifact-name: sbom-frontend-${{ needs.validate-release.outputs.version }}
+
+  # ───────────────────────────────────────────────
+  # JOB 4 — Security Scan Release Images
+  # ───────────────────────────────────────────────
+  scan-release-images:
+    name: Release — Security Scan
+    runs-on: ubuntu-latest
+    needs: [build-release-images, validate-release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan backend release image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.BACKEND_IMAGE }}@${{ needs.build-release-images.outputs.backend-digest }}
+          format: sarif
+          output: trivy-release-backend.sarif
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: 1  # Block release on CRITICAL vulns
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-release-backend.sarif
+          category: trivy-release-backend
+
+  # ───────────────────────────────────────────────
+  # JOB 5 — Create GitHub Release
+  # ───────────────────────────────────────────────
+  create-release:
+    name: Release — Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [validate-release, build-release-images, generate-sbom, scan-release-images]
+    if: success()
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download SBOM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sbom-*
+          path: release-assets/
+        continue-on-error: true  # SBOM may be skipped
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          VERSION="v${{ needs.validate-release.outputs.version }}"
+
+          # Get commit range for changelog
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "$VERSION" | head -n1 || echo "")
+
+          cat > release_notes.md << EOF
+          # VoiceGuard AI — Release $VERSION
+
+          ## Docker Images
+
+          | Image | Digest |
+          |-------|--------|
+          | Backend  | \`${{ env.BACKEND_IMAGE }}@${{ needs.build-release-images.outputs.backend-digest }}\` |
+          | Frontend | \`${{ env.FRONTEND_IMAGE }}@${{ needs.build-release-images.outputs.frontend-digest }}\` |
+
+          ## Quick Deploy
+
+          \`\`\`bash
+          # Pull by immutable digest (recommended for production)
+          docker pull ${{ env.BACKEND_IMAGE }}@${{ needs.build-release-images.outputs.backend-digest }}
+          docker pull ${{ env.FRONTEND_IMAGE }}@${{ needs.build-release-images.outputs.frontend-digest }}
+          \`\`\`
+
+          ## Alembic Migration
+
+          Run migrations before deploying:
+          \`\`\`bash
+          docker run --rm \
+            -e DATABASE_URL="\$DATABASE_URL" \
+            ${{ env.BACKEND_IMAGE }}:${{ needs.validate-release.outputs.version }} \
+            alembic upgrade head
+          \`\`\`
+
+          ## Security
+
+          - SBOM (Software Bill of Materials) attached as release assets.
+          - Trivy image scan passed for CRITICAL vulnerabilities.
+          - Signed with GitHub Actions OIDC attestation.
+
+          ## Changes
+          EOF
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "" >> release_notes.md
+            echo "### Commits since $PREV_TAG" >> release_notes.md
+            git log "$PREV_TAG..HEAD" --oneline --no-merges | head -50 >> release_notes.md || true
+          fi
+
+          cat release_notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.validate-release.outputs.version }}
+          name: VoiceGuard AI v${{ needs.validate-release.outputs.version }}
+          body_path: release_notes.md
+          prerelease: ${{ needs.validate-release.outputs.is_prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            release-assets/**/*.sbom.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ───────────────────────────────────────────────
+  # JOB 6 — Build Provenance Attestation
+  # ───────────────────────────────────────────────
+  attest-provenance:
+    name: Release — Build Provenance
+    runs-on: ubuntu-latest
+    needs: [build-release-images, validate-release, create-release]
+    if: success()
+
+    steps:
+      - name: Attest backend image provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.BACKEND_IMAGE }}
+          subject-digest: ${{ needs.build-release-images.outputs.backend-digest }}
+          push-to-registry: true
+
+      - name: Attest frontend image provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-name: ${{ env.FRONTEND_IMAGE }}
+          subject-digest: ${{ needs.build-release-images.outputs.frontend-digest }}
+          push-to-registry: true
+
