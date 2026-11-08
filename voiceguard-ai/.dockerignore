@@ -33,8 +33,7 @@ yarn-error.log*
 frontend/dist/
 frontend/node_modules/
 
-# Desktop & Mobile applications (not deployed in server container)
-desktop/
+# Mobile application (not deployed in server container)
 mobile/
 
 # Local databases and runtime state

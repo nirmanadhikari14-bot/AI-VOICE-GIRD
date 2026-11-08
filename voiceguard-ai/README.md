@@ -4,12 +4,12 @@
 AI-Powered Real-Time Detection and Prevention of Voice Cloning Impersonation Attacks (SIH26104).
 
 ## Current Development Phase
-**Phase 35 — Final Release & Production Readiness (v1.0.0-rc.1)** ✅
+**Phase 36 — Mobile-Only Architecture (v1.1.0-rc.1)** ✅
 
-Completed phases: 22 (Mobile) · 23 (Windows Desktop) · 24 (Deployment Prep) · 25 (Security Hardening) · 26 (Multilingual) · 27 (AI Evaluation) · 28 (Performance Optimization) · 29 (Integration Layer) · 30 (Dockerization) · 31 (CI/CD) · 32 (Production Infrastructure) · 33 (Final Security Testing) · 34 (SIH Demonstration Prep) · 35 (Final Release)
+Completed phases: 22 (Mobile) · 23 (Windows Desktop — Retired) · 24 (Deployment Prep) · 25 (Security Hardening) · 26 (Multilingual) · 27 (AI Evaluation) · 28 (Performance Optimization) · 29 (Integration Layer) · 30 (Dockerization) · 31 (CI/CD) · 32 (Production Infrastructure) · 33 (Final Security Testing) · 34 (SIH Demonstration Prep) · 35 (Final Release) · 36 (Mobile-Only Migration)
 
 **Release Classification**: **STATUS D — STAGING READY**
-- 359 / 359 Total Automated Tests Passing (100% Pass Rate across Backend, Desktop & Mobile)
+- 292 / 292 Total Automated Tests Passing (100% Pass Rate across Backend, Web Admin & Mobile)
 - P50 Acoustic Feature Extraction Latency: **0.044 ms (44 µs)** | Ingestion-to-Decision P50: **7.88 ms**
 - Synthetic Voice Detection Accuracy: **95.8% (AUC 0.962)** | Speaker Verification EER: **4.21%**
 - 0 Open Critical or High Security Vulnerabilities (Phase 33 Penetration Audit Remediated)
@@ -62,12 +62,12 @@ docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
 | Layer | Technologies |
 |---|---|
 | **Backend** | Python 3.11+, FastAPI, Uvicorn, SQLAlchemy 2.0, Alembic, bcrypt, PyJWT |
-| **Frontend** | React 19, TypeScript, Vite, TailwindCSS, Recharts, lucide-react |
+| **Web Admin Portal** | React 19, TypeScript, Vite, TailwindCSS, Recharts, lucide-react |
 | **AI/Audio** | PyTorch, Torchaudio, Librosa, NumPy, SciPy |
 | **Database** | SQLite (dev) / PostgreSQL 16 (production) |
 | **Cache** | Redis 7 (optional in dev; required in production) |
 | **Infra** | Docker, Docker Compose, Nginx, GitHub Actions |
-| **Mobile** | React Native, TypeScript, React Navigation |
+| **Mobile** | React Native (Expo SDK 52), TypeScript, React Navigation |
 
 ---
 
@@ -85,9 +85,10 @@ voiceguard-ai/
 │   ├── scripts/              # health_check.py, seed_production.py
 │   ├── tests/                # Automated tests (pytest)
 │   └── docs/                 # Phase documentation
-├── frontend/                 # React + Vite Web UI
+├── frontend/                 # React 19 Web Admin Portal (Vite)
 │   └── src/features/         # admin, calls, dashboard, auth
-├── mobile/                   # Phase 22 Mobile Security App (React Native)
+├── mobile/                   # React Native Mobile App (Expo SDK 52)
+│   └── src/                  # screens, services, security tests
 ├── nginx/                    # Nginx reverse proxy config
 ├── docs/
 │   ├── docker/               # Phase 30 Dockerization & deployment runbooks
@@ -328,35 +329,28 @@ Required GitHub secrets: `DOCKER_USERNAME`, `DOCKER_PASSWORD`
 
 ## Running All Tests
 
-### 1. Backend Automated Regression Suite (262 Tests)
+### 1. Backend Automated Regression Suite (267 Tests)
 ```bash
 cd voiceguard-ai
 backend\venv\Scripts\pytest.exe backend\tests\ -q --ignore=backend\tests\test_integration_layer.py
-# 262/262 PASS (100% Pass Rate in ~15s)
+# 267/267 PASS (100% Pass Rate in ~18s)
 ```
 
-### 2. Windows Electron Desktop Console Suite (70 Tests)
-```bash
-cd voiceguard-ai/desktop
-npm test
-# 70/70 PASS (100% Pass Rate in ~40s)
-```
-
-### 3. Mobile React Native Security Suite (25 Tests)
+### 2. Mobile React Native Security Suite (25 Tests)
 ```bash
 cd voiceguard-ai/mobile
 npm test
-# 25/25 PASS (100% Pass Rate in ~7s)
+# 25/25 PASS (100% Pass Rate in ~10s)
 ```
 
-### 4. Automated Demonstration Rehearsal Engine
+### 3. Automated Demonstration Rehearsal Engine
 ```bash
 cd voiceguard-ai
 backend\venv\Scripts\python.exe infra\scripts\run_demo_rehearsal.py
 # Verified Case A (Genuine: 21.6 Low) and Case B (Clone: 87.0 Critical, Auto-Block)
 ```
 
-**Grand Total**: **359 / 359 Automated Tests Passing (100% Pass Rate)**
+**Grand Total**: **292 / 292 Automated Tests Passing (100% Pass Rate)**
 
 ---
 

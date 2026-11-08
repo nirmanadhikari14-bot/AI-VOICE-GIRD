@@ -14,7 +14,7 @@ on:
       push_images:
         description: "Push images to GHCR"
         required: false
-        default: "false"
+        default: false
         type: boolean
 
 concurrency:

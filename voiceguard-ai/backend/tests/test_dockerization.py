@@ -204,7 +204,7 @@ def test_dockerignore_coverage():
     ignore_path = REPO_ROOT / ".dockerignore"
     content = ignore_path.read_text(encoding="utf-8")
 
-    required_patterns = [".env", ".git", "venv", "*.db", "node_modules", "desktop", "mobile"]
+    required_patterns = [".env", ".git", "venv", "*.db", "node_modules", "mobile"]
     for pat in required_patterns:
         assert pat in content, f".dockerignore missing exclusion for '{pat}'"
 

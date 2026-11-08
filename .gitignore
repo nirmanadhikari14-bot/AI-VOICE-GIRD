@@ -1,48 +1,23 @@
-# Environment variables and secrets
-.env
-.env.*
-!.env.example
-
-# Node.js
-node_modules/
-dist/
-build/
-.next/
-coverage/
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-
-# IDE
-.vscode/
-.idea/
-
-# Operating system
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Logs
-*.log
-logs/
-
-# Temporary files
-temp/
-tmp/
-
-# Database files
-*.db
-*.sqlite3
-
-# Python test artifacts
-htmlcov/
-
-# Build artifacts
-out/
-release/
-.vs/
+VOICE COLONING/
+│
+├── .git/
+│
+└── voiceguard-ai/
+    ├── frontend/
+    ├── backend/
+    ├── ai-engine/
+    ├── audio-engine/
+    ├── desktop/
+    ├── mobile/
+    ├── database/
+    ├── docker/
+    ├── docs/
+    ├── infra/
+    ├── nginx/
+    │
+    ├── Dockerfile.backend
+    ├── Dockerfile.frontend
+    ├── docker-compose.yml
+    ├── docker-compose.prod.yml
+    ├── README.md
+    └── .gitignore

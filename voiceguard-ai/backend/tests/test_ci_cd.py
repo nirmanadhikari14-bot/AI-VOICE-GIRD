@@ -103,6 +103,7 @@ class TestCIWorkflow:
             "test-backend",
             "migrate-validate",
             "build-frontend",
+            "test-mobile",
             "ci-gate",
         ]
         for job in required_jobs:

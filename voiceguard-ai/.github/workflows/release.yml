@@ -13,12 +13,12 @@ on:
       is_prerelease:
         description: "Mark as pre-release"
         required: false
-        default: "false"
+        default: false
         type: boolean
       generate_sbom:
         description: "Generate Software Bill of Materials"
         required: false
-        default: "true"
+        default: true
         type: boolean
 
 concurrency:
