@@ -138,74 +138,83 @@ class TestAuthenticationSecurity:
 class TestAuthorizationAndPrivilegeEscalation:
 
     def test_org_admin_cannot_elevate_to_superadmin(self):
-        """An organization admin cannot assign superadmin role to themselves or any user."""
+        """An organization admin cannot assign admin role to themselves or any user."""
         db = SessionLocal()
+        created_users = []
         try:
             org = db.query(Organization).first()
-            superadmin_role = db.query(Role).filter(Role.name == "superadmin").first()
-            analyst_role = db.query(Role).filter(Role.name == "analyst").first()
+            admin_role = db.query(Role).filter(Role.name == "admin").first()
+            org_admin_role = db.query(Role).filter(Role.name == "org_admin").first()
 
             # Create an actor who is an org admin
             actor = User(
-                id=8801,
-                email="orgadmin@tenant.com",
+                email=f"orgadmin_{int(time.time()*1000)}@tenant.com",
                 name="Tenant Admin",
+                password_hash=security.get_password_hash("pass123"),
                 organization_id=org.id,
-                role_id=analyst_role.id,
+                role_id=org_admin_role.id if org_admin_role else None,
                 status="active"
             )
             # Target user in the same org
             target_user = User(
-                id=8802,
-                email="worker@tenant.com",
+                email=f"worker_{int(time.time()*1000)}@tenant.com",
                 name="Worker User",
+                password_hash=security.get_password_hash("pass123"),
                 organization_id=org.id,
-                role_id=analyst_role.id,
+                role_id=org_admin_role.id if org_admin_role else None,
                 status="active"
             )
             db.add(actor)
             db.add(target_user)
             db.commit()
+            db.refresh(actor)
+            db.refresh(target_user)
+            created_users.extend([actor, target_user])
 
-            # Attempt to escalate target_user to superadmin role_id
-            payload = AdminUserUpdate(role_id=superadmin_role.id)
+            # Attempt to escalate target_user to admin role_id
+            payload = AdminUserUpdate(role_id=admin_role.id)
             with pytest.raises(HTTPException) as exc_info:
                 update_user(db=db, user_id=target_user.id, payload=payload, actor_user=actor)
             assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
             assert "INSUFFICIENT_PRIVILEGE" in exc_info.value.detail
-
-            # Clean up
-            db.delete(target_user)
-            db.delete(actor)
-            db.commit()
         finally:
+            for u in created_users:
+                try:
+                    db.delete(u)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
     def test_org_admin_cannot_move_user_to_another_tenant(self):
         """An organization admin cannot reassign a user's organization_id to another tenant."""
         db = SessionLocal()
+        created_users = []
         try:
             org_a = db.query(Organization).filter(Organization.id == 1).first()
             org_b = db.query(Organization).filter(Organization.id == 2).first()
-            analyst_role = db.query(Role).filter(Role.name == "analyst").first()
+            org_admin_role = db.query(Role).filter(Role.name == "org_admin").first()
 
             actor = User(
-                id=8803,
-                email="admin_org_a@test.com",
+                email=f"admin_org_a_{int(time.time()*1000)}@test.com",
+                password_hash=security.get_password_hash("pass123"),
                 organization_id=org_a.id,
-                role_id=analyst_role.id,
+                role_id=org_admin_role.id if org_admin_role else None,
                 status="active"
             )
             target = User(
-                id=8804,
-                email="user_org_a@test.com",
+                email=f"user_org_a_{int(time.time()*1000)}@test.com",
+                password_hash=security.get_password_hash("pass123"),
                 organization_id=org_a.id,
-                role_id=analyst_role.id,
+                role_id=org_admin_role.id if org_admin_role else None,
                 status="active"
             )
             db.add(actor)
             db.add(target)
             db.commit()
+            db.refresh(actor)
+            db.refresh(target)
+            created_users.extend([actor, target])
 
             # Attempt to move user to Org B
             payload = AdminUserUpdate(organization_id=org_b.id)
@@ -213,11 +222,13 @@ class TestAuthorizationAndPrivilegeEscalation:
                 update_user(db=db, user_id=target.id, payload=payload, actor_user=actor)
             assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
             assert "TENANT_ISOLATION_VIOLATION" in exc_info.value.detail
-
-            db.delete(target)
-            db.delete(actor)
-            db.commit()
         finally:
+            for u in created_users:
+                try:
+                    db.delete(u)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
 
@@ -230,13 +241,18 @@ class TestMultiTenantIsolation:
     def test_cross_tenant_alert_dismissal_blocked(self):
         """User A from Org A cannot dismiss an alert belonging to Org B (IDOR)."""
         db = SessionLocal()
+        created_records = []
         try:
             org_a = db.query(Organization).filter(Organization.id == 1).first()
             org_b = db.query(Organization).filter(Organization.id == 2).first()
 
-            user_a = User(id=8810, email="user_a@org1.com", organization_id=org_a.id, status="active")
+            user_a = User(
+                email=f"user_a_{int(time.time()*1000)}@org1.com",
+                password_hash=security.get_password_hash("pass123"),
+                organization_id=org_a.id,
+                status="active"
+            )
             alert_b = Alert(
-                id=8811,
                 organization_id=org_b.id,
                 alert_type="synthetic_voice",
                 severity="critical",
@@ -247,31 +263,41 @@ class TestMultiTenantIsolation:
             db.add(user_a)
             db.add(alert_b)
             db.commit()
+            db.refresh(user_a)
+            db.refresh(alert_b)
+            created_records.extend([alert_b, user_a])
 
             # User A attempts to dismiss Org B alert -> Must raise 403
             with pytest.raises(HTTPException) as exc_info:
                 dismiss_alert(id=alert_b.id, db=db, current_user=user_a)
             assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
             assert "TENANT_ISOLATION_VIOLATION" in exc_info.value.detail
-
-            db.delete(alert_b)
-            db.delete(user_a)
-            db.commit()
         finally:
+            for r in created_records:
+                try:
+                    db.delete(r)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
     def test_cross_tenant_incident_status_update_blocked(self):
         """User A from Org A cannot change the status of Org B's security incident."""
         db = SessionLocal()
+        created_records = []
         try:
             org_a = db.query(Organization).filter(Organization.id == 1).first()
             org_b = db.query(Organization).filter(Organization.id == 2).first()
 
-            user_a = User(id=8812, email="user_a2@org1.com", organization_id=org_a.id, status="active")
+            user_a = User(
+                email=f"user_a2_{int(time.time()*1000)}@org1.com",
+                password_hash=security.get_password_hash("pass123"),
+                organization_id=org_a.id,
+                status="active"
+            )
             inc_b = Incident(
-                id=8813,
                 organization_id=org_b.id,
-                incident_number="INC-ORG2-8813",
+                incident_number=f"INC-ORG2-{int(time.time()*1000)}",
                 title="Org B Impersonation Investigation",
                 status="open",
                 severity="high"
@@ -279,6 +305,9 @@ class TestMultiTenantIsolation:
             db.add(user_a)
             db.add(inc_b)
             db.commit()
+            db.refresh(user_a)
+            db.refresh(inc_b)
+            created_records.extend([inc_b, user_a])
 
             # User A attempts to close Org B incident
             payload = StatusUpdate(status="closed")
@@ -286,32 +315,43 @@ class TestMultiTenantIsolation:
                 update_incident_status(id=inc_b.id, payload=payload, db=db, current_user=user_a)
             assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
             assert "TENANT_ISOLATION_VIOLATION" in exc_info.value.detail
-
-            db.delete(inc_b)
-            db.delete(user_a)
-            db.commit()
         finally:
+            for r in created_records:
+                try:
+                    db.delete(r)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
     def test_cross_tenant_voice_profile_listing_and_revocation_blocked(self):
         """Org A admin cannot list or revoke voice profiles belonging to Org B."""
         db = SessionLocal()
+        created_records = []
         try:
             org_a = db.query(Organization).filter(Organization.id == 1).first()
             org_b = db.query(Organization).filter(Organization.id == 2).first()
-            analyst_role = db.query(Role).filter(Role.name == "analyst").first()
+            org_admin_role = db.query(Role).filter(Role.name == "org_admin").first()
 
-            user_a = User(id=8814, email="admin_org_a_vp@test.com", organization_id=org_a.id, role_id=analyst_role.id, status="active")
+            user_a = User(
+                email=f"admin_org_a_vp_{int(time.time()*1000)}@test.com",
+                password_hash=security.get_password_hash("pass123"),
+                organization_id=org_a.id,
+                role_id=org_admin_role.id if org_admin_role else None,
+                status="active"
+            )
             vp_b = VoiceProfile(
-                id=8815,
                 organization_id=org_b.id,
-                speaker_id="speaker_org_b_01",
+                speaker_id=f"speaker_org_b_{int(time.time()*1000)}",
                 profile_name="VIP Executive Org B",
                 baseline_confidence=0.95
             )
             db.add(user_a)
             db.add(vp_b)
             db.commit()
+            db.refresh(user_a)
+            db.refresh(vp_b)
+            created_records.extend([vp_b, user_a])
 
             # 1. User A lists voice profiles -> Must NOT contain Org B's profile
             profiles_for_a = list_voice_profiles(db=db, actor_user=user_a)
@@ -323,11 +363,13 @@ class TestMultiTenantIsolation:
                 revoke_voice_profile(db=db, profile_id=vp_b.id, actor_user=user_a)
             assert exc_info.value.status_code == status.HTTP_403_FORBIDDEN
             assert "TENANT_ISOLATION_VIOLATION" in exc_info.value.detail
-
-            db.delete(vp_b)
-            db.delete(user_a)
-            db.commit()
         finally:
+            for r in created_records:
+                try:
+                    db.delete(r)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
 
@@ -386,23 +428,30 @@ class TestPreventionEngineSafety:
     def test_prevention_action_idempotent_execution(self):
         """Executing an already-executed action must return idempotent state, not duplicate action."""
         db = SessionLocal()
+        created_records = []
         try:
             org = db.query(Organization).first()
-            superadmin = db.query(User).filter(User.role.has(name="superadmin")).first()
-            if not superadmin:
-                superadmin = User(id=8820, email="admin@prevention.com", organization_id=org.id, status="active")
-                db.add(superadmin)
-                db.commit()
+            admin_role = db.query(Role).filter(Role.name == "admin").first()
 
+            superadmin = User(
+                email=f"admin_prev_{int(time.time()*1000)}@prevention.com",
+                password_hash=security.get_password_hash("pass123"),
+                organization_id=org.id,
+                role_id=admin_role.id if admin_role else None,
+                status="active"
+            )
             action = PreventionAction(
-                id=8821,
                 organization_id=org.id,
                 action_type="terminate_sip_session",
                 status="approved",
                 provider="carrier_mock"
             )
+            db.add(superadmin)
             db.add(action)
             db.commit()
+            db.refresh(superadmin)
+            db.refresh(action)
+            created_records.extend([action, superadmin])
 
             # First execution -> status becomes "executed"
             res1 = execute_prevention_action(id=action.id, db=db, current_user=superadmin)
@@ -413,10 +462,13 @@ class TestPreventionEngineSafety:
             res2 = execute_prevention_action(id=action.id, db=db, current_user=superadmin)
             assert res2["status"] == "executed"
             assert res2.get("idempotent") is True
-
-            db.delete(action)
-            db.commit()
         finally:
+            for r in created_records:
+                try:
+                    db.delete(r)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
 
@@ -429,28 +481,33 @@ class TestBiometricPrivacyAndDataProtection:
     def test_raw_biometric_vectors_redacted_from_responses(self):
         """VoiceProfile admin responses must never expose raw embedding vector weights."""
         db = SessionLocal()
+        created_records = []
         try:
             org = db.query(Organization).first()
+            admin_user = db.query(User).filter(User.role.has(name="admin")).first()
+
             vp = VoiceProfile(
-                id=8830,
                 organization_id=org.id,
-                speaker_id="spk_biometric_test",
+                speaker_id=f"spk_biometric_{int(time.time()*1000)}",
                 profile_name="Secure Speaker",
                 baseline_confidence=0.92
             )
             db.add(vp)
             db.commit()
+            db.refresh(vp)
 
             # Attach a dummy embedding
             emb = VoiceEmbedding(
-                id=8831,
                 voice_profile_id=vp.id,
-                vector_data=b"\x00\x01" * 128
+                embedding="[0.123, -0.456, 0.789, 0.012]",
+                model_name="ecapa_tdnn",
+                model_version="1.0"
             )
             db.add(emb)
             db.commit()
+            db.refresh(emb)
+            created_records.extend([emb, vp])
 
-            admin_user = db.query(User).filter(User.role.has(name="superadmin")).first()
             profiles = list_voice_profiles(db=db, actor_user=admin_user)
             target = next((p for p in profiles if p.id == vp.id), None)
             assert target is not None
@@ -460,11 +517,13 @@ class TestBiometricPrivacyAndDataProtection:
             assert not hasattr(target, "embedding")
             assert not hasattr(target, "raw_weights")
             assert target.embedding_count == 1
-
-            db.delete(emb)
-            db.delete(vp)
-            db.commit()
         finally:
+            for r in created_records:
+                try:
+                    db.delete(r)
+                    db.commit()
+                except Exception:
+                    db.rollback()
             db.close()
 
     def test_integration_credentials_masked_in_responses(self):

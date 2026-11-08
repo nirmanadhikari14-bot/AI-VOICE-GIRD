@@ -22,6 +22,13 @@ from app.modules.evaluation.service import seed_baseline_evaluation_runs
 from sqlalchemy import text
 
 def seed():
+    # Production guard: Demo data must never be seeded into production databases
+    if os.getenv("APP_ENV", "development").lower() == "production":
+        print("[CRITICAL] seed_demo_data.py execution blocked in PRODUCTION environment.")
+        print("Demo accounts and test calls are strictly prohibited in production.")
+        print("Use scripts/seed_production.py with environment variables (SUPER_ADMIN_EMAIL, SUPER_ADMIN_PASSWORD).")
+        return
+
     # Migrate any existing tables missing new columns
     with engine.connect() as conn:
         for tbl in ["users", "calls", "alerts", "incidents", "prevention_actions", "voice_profiles", "device_registrations"]:

@@ -152,6 +152,14 @@ async def main() -> int:
     if not admin_password:
         admin_password = _generate_password(24)
         generated = True
+    else:
+        # Validate strong password in production
+        if len(admin_password) < 14:
+            print("ERROR: In production, SUPER_ADMIN_PASSWORD must be at least 14 characters long.")
+            return 1
+        if admin_password in ["VoiceGuard2026!", "admin123", "password", "Admin@123"]:
+            print("ERROR: Insecure default password rejected for production super-admin.")
+            return 1
 
     org_name = os.getenv("ORG_NAME", "VoiceGuard Production")
 
